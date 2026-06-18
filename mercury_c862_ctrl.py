@@ -112,6 +112,12 @@ class MercuryNetwork:
     def limits_on(self):
         self._execute("LN", wait_response=False)
 
+    def limits_logic_high(self):
+        self._execute("LH", wait_response=False)
+
+    def limits_logic_low(self):
+        self._execute("LL", wait_response=False)
+
     def set_velocity(self, vel: int):
         if not 0 < vel < 500000:
             raise ValueError("Velocity must be 1..499999")
@@ -129,10 +135,15 @@ class MercuryNetwork:
         self._execute(f"DL{int(ilimit)}", wait_response=False)
 
     def set_max_error(self, max_err: int):
+        if not 0 < max_err < 32767:
+            raise ValueError("Maximum following error must be 1..32766")
         self._execute(f"SM{int(max_err)}", wait_response=False)
 
     def abort(self):
         self._execute("AB", wait_response=False)
+
+    def smooth_abort(self):
+        self._execute("AB1", wait_response=False)
 
     def define_home(self):
         self._execute("DH", wait_response=False)
@@ -205,11 +216,11 @@ class MercuryNetwork:
         p_gain: int = 300,
         i_gain: int = 20,
         d_gain: int = 300,
-        max_following_error: int = 50000,
+        max_following_error: int = 30000,
     ):
         self.reset()
         self.brake_off()
-        self.limits_off()
+        self.limits_on()
         self.set_velocity(velocity)
         self.set_acceleration(acceleration)
         self.set_pid(p_gain, i_gain, d_gain)
@@ -268,10 +279,63 @@ class MercuryC862Controller(MotorController):
             "description": "Define the current hardware position as home during initialization",
             "default_value": False,
         },
+        "EnableLimits": {
+            "type": bool,
+            "description": "Enable Mercury software limit switch handling with LN",
+            "default_value": True,
+        },
+        "LimitActiveHigh": {
+            "type": bool,
+            "description": "Use LH when true, LL when false",
+            "default_value": True,
+        },
+        "MaxFollowingError": {
+            "type": int,
+            "description": "Mercury SM value. Valid range is 1..32766.",
+            "default_value": 30000,
+        },
+    }
+
+    _axis_params = {
+        0: {
+            "DP": 300,
+            "DI": 20,
+            "DD": 300,
+            "DL": 2000,
+            "SV": 50000,
+            "SA": 350000,
+            "ranges": {
+                "DP": (100, 350),
+                "DI": (0, 50),
+                "DD": (0, 400),
+                "DL": (0, 2000),
+                "SV": (1, 100000),
+                "SA": (1000, 450000),
+            },
+        },
+        1: {
+            "DP": 320,
+            "DI": 20,
+            "DD": 280,
+            "DL": 2000,
+            "SV": 10000,
+            "SA": 500000,
+            "ranges": {
+                "DP": (100, 350),
+                "DI": (0, 50),
+                "DD": (0, 400),
+                "DL": (0, 2000),
+                "SV": (1, 180000),
+                "SA": (1000, 1000000),
+            },
+        },
     }
 
     def __init__(self, inst, props, *args, **kwargs):
         super().__init__(inst, props, *args, **kwargs)
+        if not 0 < self.MaxFollowingError < 32767:
+            raise ValueError("MaxFollowingError must be in range 1..32766")
+
         self._lock = threading.RLock()
         self._net = MercuryNetwork(
             port=self.SerialPort,
@@ -295,22 +359,52 @@ class MercuryC862Controller(MotorController):
     def _select_axis(self, axis: int):
         self._net.select(self._address(axis))
 
+    def _params_for_axis(self, axis: int) -> Dict[str, object]:
+        address = self._address(axis)
+        params = self._axis_params.get(address)
+        if params is None:
+            raise ValueError(
+                "No motor parameters configured for Mercury address %d "
+                "(Sardana axis %d)" % (address, axis)
+            )
+        return params
+
+    def _check_range(self, params: Dict[str, object], name: str, value: int):
+        low, high = params["ranges"][name]
+        if not low <= value <= high:
+            raise ValueError(
+                "%s=%d is out of range for this motor (%d..%d)"
+                % (name, value, low, high)
+            )
+
     def _init_axis(self, axis: int):
         if axis in self._init_done:
             return
 
         with self._lock:
             self._select_axis(axis)
+            params = self._params_for_axis(axis)
             if self.ResetOnInit:
                 self._net.reset()
             self._net.brake_off()
-            self._net.limits_off()
-            self._net.set_velocity(50000)
-            self._net.set_acceleration(350000)
-            self._net.set_pid(300, 20, 300)
-            self._net.set_max_error(50000)
+
+            if self.LimitActiveHigh:
+                self._net.limits_logic_high()
+            else:
+                self._net.limits_logic_low()
+            if self.EnableLimits:
+                self._net.limits_on()
+            else:
+                self._net.limits_off()
+
+            self._net.set_velocity(params["SV"])
+            self._net.set_acceleration(params["SA"])
+            self._net.set_pid(params["DP"], params["DI"], params["DD"], params["DL"])
+            self._net.set_max_error(self.MaxFollowingError)
             if self.DefineHomeOnInit:
                 self._net.define_home()
+            else:
+                self._net.abort()
             self._net.motor_on()
             self._cached_pos[axis] = float(self._net.get_position())
             self._last_status[axis] = self._net.get_status_dict()
@@ -406,6 +500,7 @@ class MercuryC862Controller(MotorController):
 
         with self._lock:
             self._select_axis(axis)
+            self._net.abort()
             self._net.motor_on()
             self._net.move_absolute(pos)
         self._target[axis] = pos
@@ -413,7 +508,7 @@ class MercuryC862Controller(MotorController):
     def StopOne(self, axis: int):
         with self._lock:
             self._select_axis(axis)
-            self._net.abort()
+            self._net.smooth_abort()
         try:
             self._cached_pos[axis] = self._read_position(axis)
         except Exception as exc:
@@ -421,15 +516,24 @@ class MercuryC862Controller(MotorController):
         self._target.pop(axis, None)
 
     def AbortOne(self, axis: int):
-        self.StopOne(axis)
+        with self._lock:
+            self._select_axis(axis)
+            self._net.abort()
+        self._target.pop(axis, None)
 
     def set_param(self, axis: int, param: str, value: int):
         param = param.upper()
         if param not in ("DP", "DI", "DD", "DL", "SV", "SA", "SM"):
             raise ValueError(f"Unsupported param: {param}")
+        value = int(value)
+        if param == "SM":
+            if not 0 < value < 32767:
+                raise ValueError("SM must be in range 1..32766")
+        else:
+            self._check_range(self._params_for_axis(axis), param, value)
         with self._lock:
             self._select_axis(axis)
-            self._net._execute(f"{param}{int(value)}", wait_response=False)
+            self._net._execute(f"{param}{value}", wait_response=False)
 
     def Close(self):
         for axis in list(self._init_done):
