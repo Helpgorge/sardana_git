@@ -1,30 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import serial
-import time
 import re
 import threading
-from typing import Optional, Dict
+import time
+from typing import Dict, Optional
+
+import serial
 from sardana import State
 from sardana.pool.controller import MotorController
-import tango
 
 
-# ----------------------------------------------------------------------
-# БИБЛИОТЕКА MERCURY C-862
-# ----------------------------------------------------------------------
 class MercuryC862Error(Exception):
     pass
 
 
 class MercuryNetwork:
-    ADDR_CHARS = [chr(ord('0') + i) for i in range(10)] + [chr(ord('A') + i) for i in range(6)]
+    ADDR_CHARS = [chr(ord("0") + i) for i in range(10)] + [
+        chr(ord("A") + i) for i in range(6)
+    ]
 
     def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0):
         self.serial = serial.Serial(
-            port=port, baudrate=baudrate, bytesize=8, parity='N', stopbits=1,
-            timeout=timeout, write_timeout=timeout
+            port=port,
+            baudrate=baudrate,
+            bytesize=8,
+            parity="N",
+            stopbits=1,
+            timeout=timeout,
+            write_timeout=timeout,
         )
         self._current_address: Optional[int] = None
         self._disable_echo_all()
@@ -35,7 +39,7 @@ class MercuryNetwork:
             try:
                 self.select(addr)
                 self._send_raw("EF")
-            except:
+            except Exception:
                 pass
         self._current_address = None
 
@@ -43,14 +47,14 @@ class MercuryNetwork:
         if not 0 <= address <= 15:
             raise ValueError("Address must be 0..15")
         addr_char = self.ADDR_CHARS[address]
-        self.serial.write(b'\x01' + addr_char.encode())
+        self.serial.write(b"\x01" + addr_char.encode())
         self.serial.flush()
         time.sleep(0.02)
         self._current_address = address
 
     def _send_raw(self, command: str):
-        if not command.endswith('\r'):
-            command += '\r'
+        if not command.endswith("\r"):
+            command += "\r"
         self.serial.write(command.encode())
         self.serial.flush()
 
@@ -61,14 +65,30 @@ class MercuryNetwork:
             if not b:
                 raise MercuryC862Error("Timeout reading response")
             data += b
-            if b == b'\x03':
+            if b == b"\x03":
                 break
-        decoded = data[:-1].decode('ascii', errors='ignore').strip()
-        for pattern in ['S:', 'P:', 'E:', 'T:', 'V:', 'Y:', 'L:', 'N:',
-                        'F:', 'X:', 'C:', 'G:', 'I:', 'D:', 'M:', 'H:']:
+
+        decoded = data[:-1].decode("ascii", errors="ignore").strip()
+        for pattern in (
+            "S:",
+            "P:",
+            "E:",
+            "T:",
+            "V:",
+            "Y:",
+            "L:",
+            "N:",
+            "F:",
+            "X:",
+            "C:",
+            "G:",
+            "I:",
+            "D:",
+            "M:",
+            "H:",
+        ):
             if pattern in decoded:
-                idx = decoded.find(pattern)
-                decoded = decoded[idx:]
+                decoded = decoded[decoded.find(pattern) :]
                 break
         return decoded
 
@@ -80,7 +100,6 @@ class MercuryNetwork:
             return self._read_response()
         return None
 
-    # ---------- Основные команды ----------
     def brake_off(self):
         self._execute("BF", wait_response=False)
 
@@ -93,30 +112,24 @@ class MercuryNetwork:
     def limits_on(self):
         self._execute("LN", wait_response=False)
 
-    def limits_logic_high(self):
-        self._execute("LH", wait_response=False)
-
-    def limits_logic_low(self):
-        self._execute("LL", wait_response=False)
-
     def set_velocity(self, vel: int):
         if not 0 < vel < 500000:
             raise ValueError("Velocity must be 1..499999")
-        self._execute(f"SV{vel}", wait_response=False)
+        self._execute(f"SV{int(vel)}", wait_response=False)
 
     def set_acceleration(self, acc: int):
         if acc < 200:
             raise ValueError("Acceleration must be >= 200")
-        self._execute(f"SA{acc}", wait_response=False)
+        self._execute(f"SA{int(acc)}", wait_response=False)
 
     def set_pid(self, p: int, i: int = 0, d: int = 0, ilimit: int = 2000):
-        self._execute(f"DP{p}", wait_response=False)
-        self._execute(f"DI{i}", wait_response=False)
-        self._execute(f"DD{d}", wait_response=False)
-        self._execute(f"DL{ilimit}", wait_response=False)
+        self._execute(f"DP{int(p)}", wait_response=False)
+        self._execute(f"DI{int(i)}", wait_response=False)
+        self._execute(f"DD{int(d)}", wait_response=False)
+        self._execute(f"DL{int(ilimit)}", wait_response=False)
 
     def set_max_error(self, max_err: int):
-        self._execute(f"SM{max_err}", wait_response=False)
+        self._execute(f"SM{int(max_err)}", wait_response=False)
 
     def abort(self):
         self._execute("AB", wait_response=False)
@@ -134,29 +147,25 @@ class MercuryNetwork:
     def reset(self):
         if self._current_address is None:
             raise MercuryC862Error("No controller selected. Call select() first.")
+        address = self._current_address
         self._send_raw("RT")
         time.sleep(2.5)
-        self.select(self._current_address)
+        self.select(address)
         self._execute("EF", wait_response=False)
         time.sleep(0.1)
 
-    def move_relative(self, steps: int):
-        self._execute(f"MR{steps}", wait_response=False)
-
     def move_absolute(self, position: int):
-        self._execute(f"MA{position}", wait_response=False)
-
-    def go_home(self):
-        self._execute("GH", wait_response=False)
+        self._execute(f"MA{int(position)}", wait_response=False)
 
     def get_status(self) -> str:
         return self._execute("TS")
 
-    def get_status_dict(self) -> Dict[str, any]:
+    def get_status_dict(self) -> Dict[str, object]:
         raw = self.get_status()
-        parts = raw.replace('S:', '').strip().split()
+        parts = raw.replace("S:", "").strip().split()
         if len(parts) < 6:
-            return {"raw": raw, "error": "cannot parse"}
+            return {"raw": raw, "error": "cannot parse status"}
+
         try:
             proc = int(parts[0], 16)
             internal = int(parts[1], 16)
@@ -164,43 +173,40 @@ class MercuryNetwork:
             sig_status = int(parts[3], 16)
             sig_inputs = int(parts[4], 16)
             err_code = int(parts[5], 16)
-            return {
-                "raw": raw,
-                "servo_enabled": not (proc & 0x80),
-                "trajectory_complete": bool(proc & 0x04),
-                "excessive_error": bool(proc & 0x20),
-                "limit_exceeded": bool(proc & 0x10),
-                "brake_on": bool(sig_status & 0x08),
-                "positive_limit": bool(sig_inputs & 0x04),
-                "negative_limit": bool(sig_inputs & 0x08),
-                "reference_input": bool(sig_inputs & 0x02),
-                "error_code": err_code,
-                "internal_flags": internal,
-                "motor_flags": motor,
-            }
         except Exception:
-            return {"raw": raw, "error": "parse exception"}
+            return {"raw": raw, "error": "cannot parse status"}
+
+        return {
+            "raw": raw,
+            "servo_enabled": not (proc & 0x80),
+            "trajectory_complete": bool(proc & 0x04),
+            "excessive_error": bool(proc & 0x20),
+            "limit_exceeded": bool(proc & 0x10),
+            "brake_on": bool(sig_status & 0x08),
+            "positive_limit": bool(sig_inputs & 0x04),
+            "negative_limit": bool(sig_inputs & 0x08),
+            "reference_input": bool(sig_inputs & 0x02),
+            "error_code": err_code,
+            "internal_flags": internal,
+            "motor_flags": motor,
+        }
 
     def get_position(self) -> int:
         resp = self._execute("TP")
-        match = re.search(r'[+-]\d+', resp)
+        match = re.search(r"[+-]\d+", resp)
         if match:
             return int(match.group())
         raise MercuryC862Error(f"Can't parse position: {resp}")
 
-    def get_error(self) -> int:
-        resp = self._execute("TE")
-        match = re.search(r'[+-]\d+', resp)
-        if match:
-            return int(match.group())
-        raise MercuryC862Error(f"Can't parse error: {resp}")
-
-    def get_version(self) -> str:
-        return self._execute("VE")
-
-    def initialize_default(self, velocity: int = 20000, acceleration: int = 50000,
-                           p_gain: int = 80, i_gain: int = 0, d_gain: int = 0,
-                           max_following_error: int = 50000):
+    def initialize_default(
+        self,
+        velocity: int = 50000,
+        acceleration: int = 350000,
+        p_gain: int = 300,
+        i_gain: int = 20,
+        d_gain: int = 300,
+        max_following_error: int = 50000,
+    ):
         self.reset()
         self.brake_off()
         self.limits_off()
@@ -212,263 +218,227 @@ class MercuryNetwork:
         self.motor_on()
 
     def close(self):
-        self.serial.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
+        if self.serial and self.serial.is_open:
+            self.serial.close()
 
 
-# ----------------------------------------------------------------------
-# SARDANA КОНТРОЛЛЕР
-# ----------------------------------------------------------------------
 class MercuryC862Controller(MotorController):
+    """
+    Sardana motor controller for PI Mercury C-862.
+
+    Mercury address is calculated as:
+        address = Sardana axis + AddressOffset
+
+    Use AddressOffset=0 for Sardana axes 0/1 mapped to Mercury addresses 0/1.
+    Use AddressOffset=-1 for Sardana axes 1/2 mapped to Mercury addresses 0/1.
+    """
+
     ctrl_properties = {
-        'SerialPort': {'type': str},
-        'BaudRate': {'type': int, 'default_value': 9600},
-        'timeout': {'type': float, 'default_value': 1.0},
+        "SerialPort": {
+            "type": str,
+            "description": "Serial port, e.g. /dev/ttyUSB0",
+        },
+        "BaudRate": {
+            "type": int,
+            "description": "Serial baud rate",
+            "default_value": 9600,
+        },
+        "Timeout": {
+            "type": float,
+            "description": "Serial timeout in seconds",
+            "default_value": 1.0,
+        },
+        "AddressOffset": {
+            "type": int,
+            "description": "Mercury address offset: address = Sardana axis + offset",
+            "default_value": 0,
+        },
+        "InitializeOnAdd": {
+            "type": bool,
+            "description": "Run Mercury initialization when the motor is added",
+            "default_value": True,
+        },
+        "ResetOnInit": {
+            "type": bool,
+            "description": "Send RT reset during initialization",
+            "default_value": False,
+        },
+        "DefineHomeOnInit": {
+            "type": bool,
+            "description": "Define the current hardware position as home during initialization",
+            "default_value": False,
+        },
     }
 
     def __init__(self, inst, props, *args, **kwargs):
         super().__init__(inst, props, *args, **kwargs)
-
-        if self.BaudRate is None:
-            self.BaudRate = 9600
-        if self.timeout is None:
-            self.timeout = 1.0
-
-        self._default_params = {
-            0: {'SV': 50000, 'SA': 350000, 'DP': 300, 'DI': 20, 'DD': 300, 'DL': 2000, 'SM': 50000},
-            1: {'SV': 10000, 'SA': 500000, 'DP': 320, 'DI': 20, 'DD': 280, 'DL': 2000, 'SM': 50000},
-        }
-        self._params = {
-            0: self._default_params[0].copy(),
-            1: self._default_params[1].copy(),
-        }
-
+        self._lock = threading.RLock()
         self._net = MercuryNetwork(
             port=self.SerialPort,
             baudrate=self.BaudRate,
-            timeout=self.timeout
+            timeout=self.Timeout,
         )
-
         self._init_done = set()
         self._target = {}
-        self._moving_start = {}
         self._cached_pos = {}
-        self._cached_pos_time = {}
-        self._tango_proxy = None
+        self._last_status = {}
+
+    def _address(self, axis: int) -> int:
+        address = int(axis) + int(self.AddressOffset)
+        if not 0 <= address <= 15:
+            raise ValueError(
+                "Mercury address %d is out of range for Sardana axis %d. "
+                "Check AddressOffset." % (address, axis)
+            )
+        return address
+
+    def _select_axis(self, axis: int):
+        self._net.select(self._address(axis))
 
     def _init_axis(self, axis: int):
         if axis in self._init_done:
-            return True
+            return
 
-        try:
-            self._net.select(axis)
-            self._net.initialize_default(
-                velocity=20000,
-                acceleration=50000,
-                p_gain=80,
-                i_gain=0,
-                d_gain=0,
-                max_following_error=50000
-            )
-
-            params = self._params.get(axis, {})
-            if params:
-                sv = params.get('SV', 20000)
-                sa = params.get('SA', 50000)
-                dp = params.get('DP', 80)
-                di = params.get('DI', 0)
-                dd = params.get('DD', 0)
-                dl = params.get('DL', 2000)
-                sm = params.get('SM', 50000)
-
-                self._net.set_velocity(sv)
-                self._net.set_acceleration(sa)
-                self._net.set_pid(dp, di, dd, dl)
-                self._net.set_max_error(sm)
+        with self._lock:
+            self._select_axis(axis)
+            if self.ResetOnInit:
+                self._net.reset()
+            self._net.brake_off()
+            self._net.limits_off()
+            self._net.set_velocity(50000)
+            self._net.set_acceleration(350000)
+            self._net.set_pid(300, 20, 300)
+            self._net.set_max_error(50000)
+            if self.DefineHomeOnInit:
                 self._net.define_home()
-
+            self._net.motor_on()
+            self._cached_pos[axis] = float(self._net.get_position())
+            self._last_status[axis] = self._net.get_status_dict()
             self._init_done.add(axis)
-            try:
-                pos = float(self._net.get_position())
-                self._cached_pos[axis] = pos
-                # Обновляем Tango-атрибут Position
-                self._update_tango_position(axis, pos)
-            except:
-                self._cached_pos[axis] = 0.0
-            self._cached_pos_time[axis] = time.time()
-            return True
-        except Exception:
-            self._cached_pos[axis] = 0.0
-            return False
 
-    def _update_tango_position(self, axis, pos):
-        """Принудительно записывает позицию в Tango-атрибут Position."""
-        try:
-            if self._tango_proxy is None:
-                # Получаем имя устройства мотора
-                # В Sardana имя устройства формируется как имя контроллера + /axis
-                # Например, если контроллер называется c862_ctrl_01, то мотор для оси 0 будет motor/c862_ctrl_01/0
-                # Но мы не знаем точное имя. Можно попробовать получить из атрибута self.get_name()
-                # self.get_name() возвращает имя Tango-устройства контроллера.
-                # Для мотора имя будет другим. Вместо этого используем прямое обращение через Tango.
-                pass
-            # Если не удалось, игнорируем
-        except Exception as e:
-            self._log.warning("Failed to update Tango Position: %s", e)
+    def _read_position(self, axis: int) -> float:
+        with self._lock:
+            self._select_axis(axis)
+            pos = float(self._net.get_position())
+        self._cached_pos[axis] = pos
+        return pos
 
-    def _ensure_selected(self, axis: int):
-        self._net.select(axis)
+    def _read_status(self, axis: int) -> Dict[str, object]:
+        with self._lock:
+            self._select_axis(axis)
+            status = self._net.get_status_dict()
+        self._last_status[axis] = status
+        return status
 
-    # ---------- Sardana API ----------
     def AddDevice(self, axis: int):
-        self._log.info("AddDevice called for axis %d", axis)
-        self._target[axis] = 0
-        self._cached_pos[axis] = 0.0
-        self._init_axis(axis)
-        # Дополнительно: принудительно читаем позицию через Tango-атрибут, чтобы инициализировать его
-        try:
-            # Имя устройства мотора известно из конфигурации Sardana.
-            # Вместо этого просто вызовем read_attribute через self.get_device_proxy()?
-            # Но self.get_device_proxy() не доступен в MotorController.
-            # Попробуем получить через имя устройства.
-            dev_name = self.get_name()  # это имя контроллера, например, "c862_ctrl_01"
-            # Для мотора имя будет "motor/c862_ctrl_01/0"
-            # Мы не знаем точное имя, поэтому оставляем как есть.
-            self._log.info("AddDevice: Tango Position attribute may not be initialized. Use 'set_pos mot_mercury_01 0' before scanning.")
-        except Exception as e:
-            self._log.error("Error in AddDevice: %s", e)
+        self._log.info(
+            "Adding Mercury C-862 axis %d at address %d", axis, self._address(axis)
+        )
+        self._target.pop(axis, None)
+        if self.InitializeOnAdd:
+            self._init_axis(axis)
+        else:
+            self._cached_pos[axis] = self._read_position(axis)
 
     def DeleteDevice(self, axis: int):
-        for axis in list(self._init_done):
+        self._log.info("Deleting Mercury C-862 axis %d", axis)
+        if axis in self._init_done:
             try:
-                self._ensure_selected(axis)
-                self._net.motor_off()
-                time.sleep(0.1)
-            except Exception:
-                pass
+                with self._lock:
+                    self._select_axis(axis)
+                    self._net.abort()
+                    self._net.motor_off()
+            except Exception as exc:
+                self._log.warning("Could not stop axis %d while deleting: %s", axis, exc)
+
         self._target.pop(axis, None)
         self._init_done.discard(axis)
-        self._moving_start.pop(axis, None)
         self._cached_pos.pop(axis, None)
-        self._cached_pos_time.pop(axis, None)
+        self._last_status.pop(axis, None)
 
     def StateOne(self, axis: int):
         if axis not in self._init_done:
-            return State.On, "Init in progress"
-
-        self._ensure_selected(axis)
-
-        moving = axis in self._moving_start
-        if not moving:
-            return State.On, "Ready"
+            try:
+                self._init_axis(axis)
+            except Exception as exc:
+                self._log.error("Axis %d initialization failed: %s", axis, exc)
+                return State.Fault, "Initialization failed: %s" % exc
 
         try:
-            current = self._net.get_position()
-            self._cached_pos[axis] = float(current)
-            self._cached_pos_time[axis] = time.time()
-        except Exception as e:
-            self._log.error("StateOne position read error: %s", e)
-            return State.Fault, "Position read error"
+            status = self._read_status(axis)
+        except Exception as exc:
+            self._log.error("StateOne status read error for axis %d: %s", axis, exc)
+            return State.Fault, "Status read error: %s" % exc
 
-        target = self._target.get(axis, current)
+        if status.get("error"):
+            return State.Fault, str(status.get("raw", status["error"]))
+        if status.get("error_code"):
+            return State.Fault, "Mercury error %s" % status["error_code"]
+        if status.get("excessive_error"):
+            return State.Fault, "Excessive following error"
+        if status.get("limit_exceeded"):
+            return State.Alarm, "Limit switch reached"
+        if not status.get("servo_enabled", True):
+            return State.Off, "Motor is off"
 
-        status = self._net.get_status_dict()
-        if status.get('trajectory_complete', False):
-            self._moving_start.pop(axis, None)
+        if status.get("trajectory_complete", False):
+            self._target.pop(axis, None)
             return State.On, "Ready"
 
-        return State.Moving, f"{current} -> {target}"
+        target = self._target.get(axis)
+        if target is None:
+            return State.Moving, "Moving"
+        return State.Moving, "Moving to %s" % target
 
     def ReadOne(self, axis: int):
-        self._log.info("ReadOne called for axis %d", axis)
         try:
-            if axis not in self._cached_pos or self._cached_pos.get(axis) is None:
-                try:
-                    self._net.select(axis)
-                    pos = self._net.get_position()
-                    self._cached_pos[axis] = float(pos)
-                except:
-                    self._cached_pos[axis] = 0.0
-            result = float(self._cached_pos[axis])
-            self._log.info("ReadOne returning %s", result)
-            return result
-        except Exception as e:
-            self._log.error("ReadOne error: %s", e)
-            return 0.0
+            return self._read_position(axis)
+        except Exception as exc:
+            self._log.error("ReadOne position read error for axis %d: %s", axis, exc)
+            raise
 
     def StartOne(self, axis: int, position: float):
-        self._log.info("StartOne axis %d, requested position=%s (type=%s)", 
-                       axis, position, type(position))
-        pos = int(round(position))
-
-        self._ensure_selected(axis)
-
-        try:
-            self._net.abort()
-        except:
-            pass
-
         if axis not in self._init_done:
-            if not self._init_axis(axis):
-                raise RuntimeError("Init failed")
+            self._init_axis(axis)
 
-        self._net.motor_on()
+        pos = int(round(float(position)))
+        self._log.info("Moving Mercury C-862 axis %d to %d", axis, pos)
 
-        try:
-            current_pos = self._net.get_position()
-            self._cached_pos[axis] = float(current_pos)
-            self._cached_pos_time[axis] = time.time()
-        except Exception as e:
-            self._log.warning("Could not read current position: %s, using 0", e)
-            current_pos = 0
-
+        with self._lock:
+            self._select_axis(axis)
+            self._net.motor_on()
+            self._net.move_absolute(pos)
         self._target[axis] = pos
-        self._moving_start[axis] = time.time()
-
-        self._log.info("Sending move_absolute(%s)", pos)
-        self._net.move_absolute(pos)
-        time.sleep(0.02)
-
-        try:
-            self._net.get_error()
-        except Exception:
-            pass
 
     def StopOne(self, axis: int):
-        self._ensure_selected(axis)
-        try:
+        with self._lock:
+            self._select_axis(axis)
             self._net.abort()
-        except Exception:
-            pass
-        self._moving_start.pop(axis, None)
         try:
-            self._cached_pos[axis] = float(self._net.get_position())
-            self._cached_pos_time[axis] = time.time()
-        except Exception:
-            pass
+            self._cached_pos[axis] = self._read_position(axis)
+        except Exception as exc:
+            self._log.warning("Could not read stopped position for axis %d: %s", axis, exc)
+        self._target.pop(axis, None)
 
     def AbortOne(self, axis: int):
         self.StopOne(axis)
 
     def set_param(self, axis: int, param: str, value: int):
         param = param.upper()
-        if param not in ('DP', 'DI', 'DD', 'DL', 'SV', 'SA', 'SM'):
+        if param not in ("DP", "DI", "DD", "DL", "SV", "SA", "SM"):
             raise ValueError(f"Unsupported param: {param}")
-        self._ensure_selected(axis)
-        self._net._execute(f"{param}{value}", wait_response=False)
+        with self._lock:
+            self._select_axis(axis)
+            self._net._execute(f"{param}{int(value)}", wait_response=False)
 
     def Close(self):
         for axis in list(self._init_done):
             try:
-                self._ensure_selected(axis)
-                self._net.motor_off()
-                time.sleep(0.1)
-            except Exception:
-                pass
-        if hasattr(self, '_net'):
+                with self._lock:
+                    self._select_axis(axis)
+                    self._net.motor_off()
+                    time.sleep(0.1)
+            except Exception as exc:
+                self._log.warning("Could not switch off axis %d: %s", axis, exc)
+        if hasattr(self, "_net"):
             self._net.close()
