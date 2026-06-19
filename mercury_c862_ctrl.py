@@ -8,7 +8,7 @@ from typing import Dict, Optional
 
 import serial
 from sardana import State
-from sardana.pool.controller import MotorController
+from sardana.pool.controller import DefaultValue, MotorController
 
 
 class MercuryC862Error(Exception):
@@ -240,8 +240,8 @@ class MercuryC862Controller(MotorController):
     Mercury address is calculated as:
         address = Sardana axis + AddressOffset
 
-    Use AddressOffset=0 for Sardana axes 0/1 mapped to Mercury addresses 0/1.
-    Use AddressOffset=-1 for Sardana axes 1/2 mapped to Mercury addresses 0/1.
+    The default AddressOffset=-1 maps Sardana axes 1/2 to Mercury addresses 0/1.
+    Use AddressOffset=0 only if your Sardana axes are numbered from 0.
     """
 
     ctrl_properties = {
@@ -252,47 +252,52 @@ class MercuryC862Controller(MotorController):
         "BaudRate": {
             "type": int,
             "description": "Serial baud rate",
-            "default_value": 9600,
+            DefaultValue: 9600,
         },
         "Timeout": {
             "type": float,
             "description": "Serial timeout in seconds",
-            "default_value": 1.0,
+            DefaultValue: 1.0,
         },
         "AddressOffset": {
             "type": int,
             "description": "Mercury address offset: address = Sardana axis + offset",
-            "default_value": 0,
+            DefaultValue: -1,
         },
         "InitializeOnAdd": {
             "type": bool,
             "description": "Run Mercury initialization when the motor is added",
-            "default_value": True,
+            DefaultValue: False,
         },
         "ResetOnInit": {
             "type": bool,
             "description": "Send RT reset during initialization",
-            "default_value": False,
+            DefaultValue: False,
         },
         "DefineHomeOnInit": {
             "type": bool,
             "description": "Define the current hardware position as home during initialization",
-            "default_value": False,
+            DefaultValue: False,
         },
         "EnableLimits": {
             "type": bool,
             "description": "Enable Mercury software limit switch handling with LN",
-            "default_value": True,
+            DefaultValue: True,
         },
         "LimitActiveHigh": {
             "type": bool,
             "description": "Use LH when true, LL when false",
-            "default_value": True,
+            DefaultValue: True,
         },
         "MaxFollowingError": {
             "type": int,
             "description": "Mercury SM value. Valid range is 1..32766.",
-            "default_value": 30000,
+            DefaultValue: 30000,
+        },
+        "FaultOnErrorCode": {
+            "type": bool,
+            "description": "Treat non-zero Mercury TS error code as Sardana Fault",
+            DefaultValue: False,
         },
     }
 
@@ -424,15 +429,34 @@ class MercuryC862Controller(MotorController):
         self._last_status[axis] = status
         return status
 
+    def _status_text(self, text: str, status: Dict[str, object]) -> str:
+        error_code = status.get("error_code")
+        if error_code:
+            return "%s (Mercury error code %s)" % (text, error_code)
+        return text
+
     def AddDevice(self, axis: int):
+        address = self._address(axis)
+        self._params_for_axis(axis)
         self._log.info(
-            "Adding Mercury C-862 axis %d at address %d", axis, self._address(axis)
+            "Adding Mercury C-862 axis %d at address %d", axis, address
         )
         self._target.pop(axis, None)
         if self.InitializeOnAdd:
-            self._init_axis(axis)
+            try:
+                self._init_axis(axis)
+            except Exception as exc:
+                self._last_status[axis] = {
+                    "error": "initialization failed",
+                    "raw": str(exc),
+                }
+                self._log.error(
+                    "Mercury C-862 axis %d initialization during AddDevice failed: %s",
+                    axis,
+                    exc,
+                )
         else:
-            self._cached_pos[axis] = self._read_position(axis)
+            self._cached_pos.setdefault(axis, 0.0)
 
     def DeleteDevice(self, axis: int):
         self._log.info("Deleting Mercury C-862 axis %d", axis)
@@ -466,7 +490,7 @@ class MercuryC862Controller(MotorController):
 
         if status.get("error"):
             return State.Fault, str(status.get("raw", status["error"]))
-        if status.get("error_code"):
+        if status.get("error_code") and self.FaultOnErrorCode:
             return State.Fault, "Mercury error %s" % status["error_code"]
         if status.get("excessive_error"):
             return State.Fault, "Excessive following error"
@@ -477,12 +501,12 @@ class MercuryC862Controller(MotorController):
 
         if status.get("trajectory_complete", False):
             self._target.pop(axis, None)
-            return State.On, "Ready"
+            return State.On, self._status_text("Ready", status)
 
         target = self._target.get(axis)
         if target is None:
-            return State.Moving, "Moving"
-        return State.Moving, "Moving to %s" % target
+            return State.Moving, self._status_text("Moving", status)
+        return State.Moving, self._status_text("Moving to %s" % target, status)
 
     def ReadOne(self, axis: int):
         try:

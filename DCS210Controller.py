@@ -6,7 +6,7 @@ import time
 import threading
 import re
 from sardana import State
-from sardana.pool.controller import CounterTimerController, DataAccess
+from sardana.pool.controller import CounterTimerController, DataAccess, DefaultValue
 
 ReadOnly = DataAccess.ReadOnly
 ReadWrite = DataAccess.ReadWrite
@@ -26,27 +26,27 @@ class DCS210Controller(CounterTimerController):
         'SerialPort': {
             'type': str,
             'description': 'Serial port',
-            'default_value': '/dev/ttyUSB0'
+            DefaultValue: '/dev/ttyUSB0'
         },
         'BaudRate': {
             'type': int,
             'description': 'Baud rate',
-            'default_value': 9600
+            DefaultValue: 9600
         },
         'Timeout': {
             'type': float,
             'description': 'Serial timeout (seconds)',
-            'default_value': 2.0
+            DefaultValue: 2.0
         },
         'CounterAxis': {
             'type': int,
             'description': 'Counter axis. Use -1 to assign the first added axis automatically.',
-            'default_value': -1
+            DefaultValue: -1
         },
         'TimerAxis': {
             'type': int,
             'description': 'Timer axis. Use -1 to assign the second added axis automatically.',
-            'default_value': -1
+            DefaultValue: -1
         }
     }
 
@@ -69,6 +69,7 @@ class DCS210Controller(CounterTimerController):
         self._devices = set()
         self._counter_axis = self.CounterAxis if self.CounterAxis >= 0 else None
         self._timer_axis = self.TimerAxis if self.TimerAxis >= 0 else None
+        self._line_terminator = "\r\n"
 
         port = self.SerialPort
         baud = self.BaudRate
@@ -92,7 +93,7 @@ class DCS210Controller(CounterTimerController):
 
     def _init_device(self):
         """Отправка команд инициализации."""
-        self._send_command("Hello")
+        self._handshake()
         self._send_command("DAQ_MODE Q")
         self._send_command("COUNT_MODE 3")
         self._send_command("COUNT_SAMPLINGTIME 1000000")
@@ -104,16 +105,35 @@ class DCS210Controller(CounterTimerController):
             self._serial.close()
             self._log.info("Serial port closed")
 
-    def _send_command(self, command, timeout=None):
+    def _handshake(self):
+        """Establish communication and detect the line terminator accepted by DCS210."""
+        errors = []
+        for terminator in ("\r\n", "\r", "\n"):
+            for command in ("Hello", "HELLO", "hello"):
+                try:
+                    self._send_command(command, timeout=self.Timeout, terminator=terminator)
+                    self._line_terminator = terminator
+                    self._log.info(
+                        "DCS210 handshake succeeded with terminator %r",
+                        terminator
+                    )
+                    return
+                except Exception as exc:
+                    errors.append("%s/%r: %s" % (command, terminator, exc))
+        raise RuntimeError("DCS210 handshake failed: " + "; ".join(errors))
+
+    def _send_command(self, command, timeout=None, terminator=None):
         """Отправка команды и получение ответа."""
         if not self._serial or not self._serial.is_open:
             raise RuntimeError("Serial port not available")
         if timeout is None:
             timeout = self.Timeout
+        if terminator is None:
+            terminator = self._line_terminator
 
         with self._lock:
             self._serial.reset_input_buffer()
-            self._serial.write((command + '\r').encode())
+            self._serial.write((command + terminator).encode())
             self._serial.flush()
             self._log.debug("Sent: %s", command)
 
@@ -199,7 +219,7 @@ class DCS210Controller(CounterTimerController):
         if not self._serial or not self._serial.is_open:
             return
         try:
-            self._serial.write(b"Stop\r")
+            self._serial.write(("Stop" + self._line_terminator).encode())
             self._serial.flush()
         except Exception as e:
             self._log.warning("Stop command failed: %s", e)
